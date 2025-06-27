@@ -1,0 +1,770 @@
+# 🔧 Enhanced Cable OCR Automation System
+# Following clean code structure from clean_code_structure.md
+
+import cv2
+import numpy as np
+import pytesseract
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional, Union
+from dataclasses import dataclass
+import logging
+import json
+import time
+import pyautogui
+from abc import ABC, abstractmethod
+
+# ============================================================================
+# CONFIGURATION MANAGEMENT
+# ============================================================================
+
+@dataclass
+class CableOCRConfig:
+    """Configuration class following clean code principles."""
+    
+    # Tesseract settings
+    tesseract_path: str = r"C:\Users\ykim\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+    ocr_config: str = '--oem 3 --psm 6'
+    confidence_threshold: int = 50
+    
+    # Image processing settings
+    preprocessing_enabled: bool = True
+    debug_mode: bool = True
+    save_debug_images: bool = True
+    
+    # Automation settings
+    click_delay: float = 0.3
+    type_delay: float = 0.1
+    coordinate_tolerance: int = 25
+    
+    # File paths
+    debug_output_path: Path = Path("debug_output")
+    screenshots_path: Path = Path("screenshots")
+    logs_path: Path = Path("logs")
+    
+    # Cable-specific settings
+    cable_types: List[str] = None
+    price_update_patterns: Dict[str, float] = None
+    
+    def __post_init__(self):
+        if self.cable_types is None:
+            self.cable_types = ['VMA Cable', 'Standard Cable', 'Premium Cable']
+        
+        if self.price_update_patterns is None:
+            self.price_update_patterns = {
+                'VMA Cable': 1.15,      # 15% markup
+                'Standard Cable': 1.10,  # 10% markup
+                'Premium Cable': 1.20    # 20% markup
+            }
+        
+        # Create output directories
+        for path in [self.debug_output_path, self.screenshots_path, self.logs_path]:
+            path.mkdir(exist_ok=True)
+
+# ============================================================================
+# BASE CLASSES FOLLOWING CLEAN ARCHITECTURE
+# ============================================================================
+
+class BaseOCRProcessor(ABC):
+    """Abstract base class for OCR processors."""
+    
+    def __init__(self, config: CableOCRConfig):
+        self.config = config
+        self.logger = self._setup_logging()
+        self.processing_log: List[str] = []
+        
+        # Set Tesseract path
+        pytesseract.pytesseract.tesseract_cmd = config.tesseract_path
+        
+    def _setup_logging(self) -> logging.Logger:
+        """Setup structured logging."""
+        logger = logging.getLogger(self.__class__.__name__)
+        logger.setLevel(logging.INFO)
+        
+        if not logger.handlers:
+            # File handler
+            log_file = self.config.logs_path / f"{self.__class__.__name__}_{datetime.now().strftime('%Y%m%d')}.log"
+            file_handler = logging.FileHandler(log_file)
+            
+            # Console handler
+            console_handler = logging.StreamHandler()
+            
+            # Formatter
+            formatter = logging.Formatter(
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            )
+            file_handler.setFormatter(formatter)
+            console_handler.setFormatter(formatter)
+            
+            logger.addHandler(file_handler)
+            logger.addHandler(console_handler)
+        
+        return logger
+    
+    def log_step(self, step: str, details: str = "", success: bool = True):
+        """Log processing step with timestamp."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        status = "✅" if success else "❌"
+        log_entry = f"[{timestamp}] {status} {step}"
+        if details:
+            log_entry += f": {details}"
+        
+        self.processing_log.append(log_entry)
+        
+        if success:
+            self.logger.info(f"{step}: {details}")
+        else:
+            self.logger.error(f"{step}: {details}")
+        
+        print(log_entry)
+    
+    @abstractmethod
+    def process(self, input_data: any) -> any:
+        """Abstract method for processing."""
+        pass
+
+# ============================================================================
+# ENHANCED IMAGE PREPROCESSING
+# ============================================================================
+
+class AdvancedImagePreprocessor(BaseOCRProcessor):
+    """Advanced image preprocessing for better OCR accuracy."""
+    
+    def process(self, image_path: Union[str, Path]) -> np.ndarray:
+        """
+        Apply advanced preprocessing pipeline.
+        
+        Args:
+            image_path: Path to input image
+            
+        Returns:
+            Preprocessed image array
+        """
+        self.log_step("Image Preprocessing", f"Processing {image_path}")
+        
+        # Load image
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise ValueError(f"Could not load image: {image_path}")
+        
+        # Apply preprocessing pipeline
+        processed = self._apply_preprocessing_pipeline(image)
+        
+        # Save debug image if enabled
+        if self.config.save_debug_images:
+            debug_path = self.config.debug_output_path / f"preprocessed_{Path(image_path).name}"
+            cv2.imwrite(str(debug_path), processed)
+            self.log_step("Debug Image Saved", str(debug_path))
+        
+        return processed
+    
+    def _apply_preprocessing_pipeline(self, image: np.ndarray) -> np.ndarray:
+        """Apply comprehensive preprocessing pipeline."""
+        
+        # Convert to grayscale
+        if len(image.shape) == 3:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = image.copy()
+        
+        # Noise reduction
+        denoised = cv2.fastNlMeansDenoising(gray)
+        
+        # Enhance contrast using CLAHE
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(denoised)
+        
+        # Morphological operations to improve text structure
+        kernel = np.ones((1,1), np.uint8)
+        morph = cv2.morphologyEx(enhanced, cv2.MORPH_CLOSE, kernel)
+        
+        # Adaptive thresholding for better text extraction
+        binary = cv2.adaptiveThreshold(
+            morph, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2
+        )
+        
+        # Optional: Dilation to make text thicker if needed
+        kernel = np.ones((1,1), np.uint8)
+        final = cv2.dilate(binary, kernel, iterations=1)
+        
+        return final
+
+# ============================================================================
+# ENHANCED TABLE DETECTION AND PARSING
+# ============================================================================
+
+class CableTableParser(BaseOCRProcessor):
+    """Enhanced table parsing specifically for cable data."""
+    
+    def __init__(self, config: CableOCRConfig):
+        super().__init__(config)
+        self.table_structure = {}
+        self.detected_elements = []
+    
+    def process(self, image: np.ndarray) -> Dict[str, any]:
+        """
+        Parse table structure and extract cable data.
+        
+        Args:
+            image: Preprocessed image
+            
+        Returns:
+            Dictionary with parsed table data
+        """
+        self.log_step("Table Parsing", "Starting enhanced table analysis")
+        
+        # Extract all text elements with coordinates
+        detailed_data = pytesseract.image_to_data(
+            image, 
+            output_type=pytesseract.Output.DICT,
+            config=self.config.ocr_config
+        )
+        
+        # Filter high-confidence elements
+        elements = self._filter_high_confidence_elements(detailed_data)
+        self.detected_elements = elements
+        
+        # Analyze table structure
+        table_structure = self._analyze_table_structure(elements)
+        
+        # Extract cable-specific data
+        cable_data = self._extract_cable_data(elements, table_structure)
+        
+        # Generate debug visualization
+        if self.config.debug_mode:
+            self._create_debug_visualization(image, elements, cable_data)
+        
+        return {
+            'cable_data': cable_data,
+            'table_structure': table_structure,
+            'raw_elements': elements,
+            'total_elements': len(elements)
+        }
+    
+    def _filter_high_confidence_elements(self, ocr_data: Dict) -> List[Dict]:
+        """Filter OCR elements by confidence threshold."""
+        elements = []
+        
+        for i in range(len(ocr_data['text'])):
+            confidence = int(ocr_data['conf'][i])
+            text = ocr_data['text'][i].strip()
+            
+            if confidence >= self.config.confidence_threshold and text:
+                elements.append({
+                    'text': text,
+                    'x': ocr_data['left'][i],
+                    'y': ocr_data['top'][i],
+                    'width': ocr_data['width'][i],
+                    'height': ocr_data['height'][i],
+                    'confidence': confidence,
+                    'center_x': ocr_data['left'][i] + ocr_data['width'][i] // 2,
+                    'center_y': ocr_data['top'][i] + ocr_data['height'][i] // 2
+                })
+        
+        self.log_step("Element Filtering", f"Found {len(elements)} high-confidence elements")
+        return elements
+    
+    def _analyze_table_structure(self, elements: List[Dict]) -> Dict:
+        """Analyze table structure for consistent processing."""
+        
+        # Group elements by approximate Y coordinates (rows)
+        rows = {}
+        for element in elements:
+            y_key = round(element['y'] / 20) * 20  # Group by 20-pixel tolerance
+            if y_key not in rows:
+                rows[y_key] = []
+            rows[y_key].append(element)
+        
+        # Group elements by approximate X coordinates (columns)
+        columns = {}
+        for element in elements:
+            x_key = round(element['x'] / 50) * 50  # Group by 50-pixel tolerance
+            if x_key not in columns:
+                columns[x_key] = []
+            columns[x_key].append(element)
+        
+        # Identify key columns (weight, price, cable type, etc.)
+        column_types = self._identify_column_types(columns)
+        
+        structure = {
+            'row_count': len(rows),
+            'column_count': len(columns),
+            'rows': rows,
+            'columns': columns,
+            'column_types': column_types
+        }
+        
+        self.log_step("Table Structure", f"Detected {len(rows)} rows, {len(columns)} columns")
+        return structure
+    
+    def _identify_column_types(self, columns: Dict) -> Dict:
+        """Identify column types based on content patterns."""
+        column_types = {}
+        
+        for x_pos, column_elements in columns.items():
+            # Analyze content patterns
+            texts = [elem['text'] for elem in column_elements]
+            
+            # Check for weight patterns (numbers with high values)
+            weight_score = sum(1 for text in texts if text.isdigit() and int(text) > 1000)
+            
+            # Check for price patterns ($X.XXXX)
+            price_score = sum(1 for text in texts if '$' in text and '.' in text)
+            
+            # Check for cable type patterns
+            cable_score = sum(1 for text in texts if any(cable in text for cable in self.config.cable_types))
+            
+            # Determine column type
+            if weight_score > 0:
+                column_types[x_pos] = 'weight'
+            elif price_score > 0:
+                column_types[x_pos] = 'price'
+            elif cable_score > 0:
+                column_types[x_pos] = 'cable_type'
+            else:
+                column_types[x_pos] = 'unknown'
+        
+        return column_types
+    
+    def _extract_cable_data(self, elements: List[Dict], structure: Dict) -> List[Dict]:
+        """Extract structured cable data from table elements."""
+        cable_records = []
+        
+        # Process each row
+        for y_pos, row_elements in structure['rows'].items():
+            if len(row_elements) < 3:  # Skip rows with insufficient data
+                continue
+            
+            record = {
+                'row_y': y_pos,
+                'weight': None,
+                'price': None,
+                'cable_type': None,
+                'coordinates': {},
+                'raw_elements': row_elements
+            }
+            
+            # Extract data from each element in the row
+            for element in row_elements:
+                text = element['text']
+                x_pos = element['x']
+                
+                # Determine column type for this X position
+                column_type = self._get_column_type_for_position(x_pos, structure['column_types'])
+                
+                if column_type == 'weight' and text.isdigit():
+                    record['weight'] = int(text)
+                    record['coordinates']['weight'] = (element['center_x'], element['center_y'])
+                
+                elif column_type == 'price' and '$' in text:
+                    # Clean price text
+                    price_text = text.replace('$', '').replace(',', '')
+                    try:
+                        record['price'] = float(price_text)
+                        record['coordinates']['price'] = (element['center_x'], element['center_y'])
+                    except ValueError:
+                        pass
+                
+                elif column_type == 'cable_type':
+                    record['cable_type'] = text
+                    record['coordinates']['cable_type'] = (element['center_x'], element['center_y'])
+            
+            # Only add records with essential data
+            if record['weight'] and record['price']:
+                cable_records.append(record)
+        
+        self.log_step("Cable Data Extraction", f"Extracted {len(cable_records)} cable records")
+        return cable_records
+    
+    def _get_column_type_for_position(self, x_pos: int, column_types: Dict) -> str:
+        """Get column type for a specific X position with tolerance."""
+        for col_x, col_type in column_types.items():
+            if abs(x_pos - col_x) <= 50:  # 50-pixel tolerance
+                return col_type
+        return 'unknown'
+    
+    def _create_debug_visualization(self, image: np.ndarray, elements: List[Dict], cable_data: List[Dict]):
+        """Create visual debugging output."""
+        debug_image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        
+        # Draw all detected elements
+        for element in elements:
+            cv2.rectangle(
+                debug_image,
+                (element['x'], element['y']),
+                (element['x'] + element['width'], element['y'] + element['height']),
+                (0, 255, 0), 1
+            )
+            cv2.putText(
+                debug_image,
+                element['text'][:10],  # Truncate long text
+                (element['x'], element['y'] - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.3, (0, 255, 0), 1
+            )
+        
+        # Highlight cable data with different colors
+        for i, record in enumerate(cable_data):
+            color = [(255, 0, 0), (0, 0, 255), (255, 255, 0)][i % 3]  # Cycle colors
+            
+            for coord_type, (x, y) in record['coordinates'].items():
+                cv2.circle(debug_image, (x, y), 5, color, -1)
+                cv2.putText(
+                    debug_image, f"{coord_type}_{i}",
+                    (x + 10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1
+                )
+        
+        # Save debug image
+        debug_path = self.config.debug_output_path / f"table_analysis_{datetime.now().strftime('%H%M%S')}.png"
+        cv2.imwrite(str(debug_path), debug_image)
+        self.log_step("Debug Visualization", f"Saved to {debug_path}")
+
+# ============================================================================
+# ENHANCED PRICE UPDATE AUTOMATION
+# ============================================================================
+
+class EnhancedPriceUpdater(BaseOCRProcessor):
+    """Enhanced price update automation with improved reliability."""
+    
+    def __init__(self, config: CableOCRConfig):
+        super().__init__(config)
+        self.update_history = []
+        
+    def process(self, cable_data: List[Dict]) -> Dict[str, any]:
+        """
+        Execute price updates with enhanced reliability.
+        
+        Args:
+            cable_data: List of cable records with coordinates
+            
+        Returns:
+            Update results summary
+        """
+        self.log_step("Price Update Process", f"Starting updates for {len(cable_data)} records")
+        
+        results = {
+            'total_updates': len(cable_data),
+            'successful_updates': 0,
+            'failed_updates': 0,
+            'update_details': [],
+            'verification_results': []
+        }
+        
+        for i, record in enumerate(cable_data):
+            self.log_step(f"Update {i+1}/{len(cable_data)}", f"Processing weight {record['weight']}")
+            
+            try:
+                # Calculate new price
+                new_price = self._calculate_new_price(record)
+                
+                # Execute price update
+                update_success = self._execute_price_update(record, new_price)
+                
+                if update_success:
+                    # Verify update was applied
+                    verification_result = self._verify_price_update(record, new_price)
+                    
+                    if verification_result['verified']:
+                        results['successful_updates'] += 1
+                        self.log_step("Update Verified", f"Weight {record['weight']} → ${new_price:.4f}")
+                    else:
+                        results['failed_updates'] += 1
+                        self.log_step("Update Verification Failed", f"Weight {record['weight']}", False)
+                    
+                    results['verification_results'].append(verification_result)
+                else:
+                    results['failed_updates'] += 1
+                    self.log_step("Update Failed", f"Weight {record['weight']}", False)
+                
+                # Record update details
+                results['update_details'].append({
+                    'weight': record['weight'],
+                    'old_price': record['price'],
+                    'new_price': new_price,
+                    'success': update_success,
+                    'timestamp': datetime.now().isoformat()
+                })
+                
+            except Exception as e:
+                results['failed_updates'] += 1
+                self.log_step("Update Exception", f"Weight {record['weight']}: {str(e)}", False)
+        
+        # Generate summary
+        success_rate = (results['successful_updates'] / results['total_updates']) * 100
+        self.log_step("Update Summary", f"Success rate: {success_rate:.1f}% ({results['successful_updates']}/{results['total_updates']})")
+        
+        return results
+    
+    def _calculate_new_price(self, record: Dict) -> float:
+        """Calculate new price based on cable type and business rules."""
+        base_price = record['price']
+        cable_type = record.get('cable_type', 'Standard Cable')
+        
+        # Apply markup based on cable type
+        if cable_type in self.config.price_update_patterns:
+            multiplier = self.config.price_update_patterns[cable_type]
+        else:
+            multiplier = 1.10  # Default 10% markup
+        
+        new_price = base_price * multiplier
+        
+        # Round to 4 decimal places for financial precision
+        return round(new_price, 4)
+    
+    def _execute_price_update(self, record: Dict, new_price: float) -> bool:
+        """Execute the actual price update with enhanced reliability."""
+        try:
+            # Get price field coordinates
+            if 'price' not in record['coordinates']:
+                self.log_step("Missing Coordinates", f"No price coordinates for weight {record['weight']}", False)
+                return False
+            
+            x, y = record['coordinates']['price']
+            
+            # Take screenshot before update
+            if self.config.save_debug_images:
+                screenshot_before = pyautogui.screenshot()
+                screenshot_path = self.config.screenshots_path / f"before_update_{record['weight']}_{datetime.now().strftime('%H%M%S')}.png"
+                screenshot_before.save(screenshot_path)
+            
+            # Click on price field with enhanced reliability
+            pyautogui.click(x, y)
+            time.sleep(self.config.click_delay)
+            
+            # Triple-click to select all text
+            pyautogui.click(x, y, clicks=3)
+            time.sleep(self.config.click_delay)
+            
+            # Type new price
+            price_text = f"{new_price:.4f}"
+            pyautogui.typewrite(price_text, interval=self.config.type_delay)
+            
+            # Press Tab to confirm
+            pyautogui.press('tab')
+            time.sleep(self.config.click_delay)
+            
+            # Take screenshot after update
+            if self.config.save_debug_images:
+                screenshot_after = pyautogui.screenshot()
+                screenshot_path = self.config.screenshots_path / f"after_update_{record['weight']}_{datetime.now().strftime('%H%M%S')}.png"
+                screenshot_after.save(screenshot_path)
+            
+            return True
+            
+        except Exception as e:
+            self.log_step("Update Execution Error", str(e), False)
+            return False
+    
+    def _verify_price_update(self, record: Dict, expected_price: float) -> Dict[str, any]:
+        """Verify that the price update was applied correctly."""
+        try:
+            # Take a fresh screenshot
+            screenshot = pyautogui.screenshot()
+            
+            # Convert to array for OCR
+            screenshot_array = np.array(screenshot)
+            screenshot_rgb = cv2.cvtColor(screenshot_array, cv2.COLOR_RGB2BGR)
+            
+            # Extract text from screenshot
+            text = pytesseract.image_to_string(screenshot_rgb, config=self.config.ocr_config)
+            
+            # Check if expected price is present
+            expected_price_str = f"{expected_price:.4f}"
+            price_found = expected_price_str in text or f"${expected_price_str}" in text
+            
+            verification_result = {
+                'weight': record['weight'],
+                'expected_price': expected_price,
+                'verified': price_found,
+                'screenshot_text_sample': text[:200],  # First 200 chars for debugging
+                'timestamp': datetime.now().isoformat()
+            }
+            
+            return verification_result
+            
+        except Exception as e:
+            self.log_step("Verification Error", str(e), False)
+            return {
+                'weight': record['weight'],
+                'expected_price': expected_price,
+                'verified': False,
+                'error': str(e),
+                'timestamp': datetime.now().isoformat()
+            }
+
+# ============================================================================
+# MAIN ORCHESTRATOR CLASS
+# ============================================================================
+
+class EnhancedCableAutomation:
+    """Main orchestrator for enhanced cable automation process."""
+    
+    def __init__(self, config: CableOCRConfig = None):
+        self.config = config or CableOCRConfig()
+        
+        # Initialize processors
+        self.preprocessor = AdvancedImagePreprocessor(self.config)
+        self.table_parser = CableTableParser(self.config)
+        self.price_updater = EnhancedPriceUpdater(self.config)
+        
+        # Processing results
+        self.results = {}
+        
+    def run_complete_automation(self, image_path: Union[str, Path]) -> Dict[str, any]:
+        """
+        Run the complete enhanced automation pipeline.
+        
+        Args:
+            image_path: Path to input screenshot
+            
+        Returns:
+            Complete automation results
+        """
+        print("🚀 Enhanced Cable Automation System")
+        print("=" * 50)
+        print(f"📸 Processing image: {image_path}")
+        print(f"🔧 Config: {self.config}")
+        print("=" * 50)
+        
+        try:
+            # Stage 1: Image Preprocessing
+            print("\n📊 Stage 1: Advanced Image Preprocessing")
+            processed_image = self.preprocessor.process(image_path)
+            
+            # Stage 2: Table Parsing
+            print("\n📋 Stage 2: Enhanced Table Parsing")
+            parsing_results = self.table_parser.process(processed_image)
+            
+            # Stage 3: Price Updates
+            print("\n💰 Stage 3: Enhanced Price Updates")
+            update_results = self.price_updater.process(parsing_results['cable_data'])
+            
+            # Compile final results
+            self.results = {
+                'image_path': str(image_path),
+                'processing_timestamp': datetime.now().isoformat(),
+                'preprocessing_success': True,
+                'parsing_results': parsing_results,
+                'update_results': update_results,
+                'total_elements_detected': parsing_results['total_elements'],
+                'cable_records_found': len(parsing_results['cable_data']),
+                'overall_success': update_results['successful_updates'] > 0
+            }
+            
+            # Print summary
+            self._print_automation_summary()
+            
+            # Save results to JSON
+            self._save_results_to_file()
+            
+            return self.results
+            
+        except Exception as e:
+            error_result = {
+                'image_path': str(image_path),
+                'processing_timestamp': datetime.now().isoformat(),
+                'error': str(e),
+                'overall_success': False
+            }
+            
+            print(f"\n❌ AUTOMATION FAILED: {str(e)}")
+            return error_result
+    
+    def _print_automation_summary(self):
+        """Print comprehensive automation summary."""
+        print("\n" + "=" * 50)
+        print("🎯 ENHANCED AUTOMATION SUMMARY")
+        print("=" * 50)
+        
+        update_results = self.results['update_results']
+        parsing_results = self.results['parsing_results']
+        
+        print(f"📊 Elements Detected: {self.results['total_elements_detected']}")
+        print(f"📋 Cable Records: {self.results['cable_records_found']}")
+        print(f"✅ Successful Updates: {update_results['successful_updates']}")
+        print(f"❌ Failed Updates: {update_results['failed_updates']}")
+        
+        if update_results['total_updates'] > 0:
+            success_rate = (update_results['successful_updates'] / update_results['total_updates']) * 100
+            print(f"📈 Success Rate: {success_rate:.1f}%")
+        
+        print(f"⏱️ Processing Time: {datetime.now().strftime('%H:%M:%S')}")
+        print(f"🎉 Overall Success: {'✅' if self.results['overall_success'] else '❌'}")
+        
+        # Detailed update breakdown
+        if update_results['update_details']:
+            print(f"\n📝 Update Details:")
+            for detail in update_results['update_details']:
+                status = "✅" if detail['success'] else "❌"
+                print(f"  {status} Weight {detail['weight']}: ${detail['old_price']:.4f} → ${detail['new_price']:.4f}")
+    
+    def _save_results_to_file(self):
+        """Save automation results to JSON file."""
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        results_file = self.config.debug_output_path / f"automation_results_{timestamp}.json"
+        
+        with open(results_file, 'w') as f:
+            json.dump(self.results, f, indent=2, default=str)
+        
+        print(f"\n💾 Results saved to: {results_file}")
+
+# ============================================================================
+# MAIN EXECUTION EXAMPLE
+# ============================================================================
+
+def main():
+    """Main execution function with example usage."""
+    
+    # Configure the system
+    config = CableOCRConfig()
+    config.debug_mode = True
+    config.save_debug_images = True
+    
+    # Create automation instance
+    automation = EnhancedCableAutomation(config)
+    
+    # Example usage
+    image_path = "Price_Enter.png"  # Your screenshot file
+    
+    if Path(image_path).exists():
+        results = automation.run_complete_automation(image_path)
+        
+        if results['overall_success']:
+            print("\n🎉 AUTOMATION COMPLETED SUCCESSFULLY!")
+        else:
+            print("\n⚠️ AUTOMATION COMPLETED WITH ISSUES")
+    else:
+        print(f"❌ Image file not found: {image_path}")
+        print("Please provide a valid screenshot path")
+
+if __name__ == "__main__":
+    main()
+
+# ============================================================================
+# USAGE EXAMPLES
+# ============================================================================
+
+"""
+USAGE EXAMPLES:
+
+# Basic usage:
+automation = EnhancedCableAutomation()
+results = automation.run_complete_automation("screenshot.png")
+
+# Custom configuration:
+config = CableOCRConfig()
+config.confidence_threshold = 60
+config.cable_types = ['VMA Cable', 'Custom Cable']
+config.price_update_patterns = {'VMA Cable': 1.25}
+
+automation = EnhancedCableAutomation(config)
+results = automation.run_complete_automation("screenshot.png")
+
+# Debug mode with extensive logging:
+config = CableOCRConfig()
+config.debug_mode = True
+config.save_debug_images = True
+
+automation = EnhancedCableAutomation(config)
+results = automation.run_complete_automation("screenshot.png")
+"""
